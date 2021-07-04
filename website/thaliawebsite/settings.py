@@ -532,8 +532,9 @@ OAUTH2_PROVIDER = {
         "payments:read": "Read access to payments",
         "payments:write": "Write access to payments",
         "payments:admin": "Admin access to payments",
-        "sales:read": "Read access to Point of Sale orders",
-        "sales:order": "Place orders on your behalf",
+        "sales:read": "Read access to your Point of Sale orders",
+        "sales:order": "Place Point of Sale orders on your behalf",
+        "sales:admin": "Admin access to Point of Sale orders",
     },
 }
 
@@ -579,6 +580,7 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_PAGINATION_CLASS": "thaliawebsite.api.pagination.APIv2LimitOffsetPagination",
     "PAGE_SIZE": 50,  # Only for API v2
+    "ALLOWED_VERSIONS": ["v1", "v2"],
     "DEFAULT_VERSIONING_CLASS": "rest_framework.versioning.NamespaceVersioning",
     "DEFAULT_SCHEMA_CLASS": "thaliawebsite.api.openapi.OAuthAutoSchema",
     "DEFAULT_THROTTLE_CLASSES": [
