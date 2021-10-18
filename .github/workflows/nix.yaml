@@ -1,12 +1,14 @@
 name: "Build with Nix and deploy if master"
 on:
-  pull_request:
   push:
+    branches:
+      - master
+  pull_request:
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2.3.4
+    - uses: actions/checkout@v2.3.5
     - uses: cachix/install-nix-action@v14
     - uses: cachix/cachix-action@v10
       with:

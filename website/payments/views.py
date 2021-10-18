@@ -12,7 +12,7 @@ from django.core.exceptions import (
     SuspiciousOperation,
 )
 from django.db.models import QuerySet, Sum
-from django.http import HttpResponse, HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect, Http404
 from django.shortcuts import redirect
 from django.urls import reverse_lazy
 from django.utils import timezone
@@ -184,8 +184,11 @@ class PaymentProcessView(SuccessMessageMixin, FormView):
         return super().dispatch(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
+        if self.payable is None:
+            raise Http404("Payable does not exist")
         context = super().get_context_data(**kwargs)
         context.update({"payable": self.payable})
+        context.update({"payable_hash": hash(self.payable)})
         context.update(
             {
                 "new_balance": PaymentUser.objects.get(
@@ -196,8 +199,34 @@ class PaymentProcessView(SuccessMessageMixin, FormView):
         )
         return context
 
+    def _check_payment_allowed(self, request, payable_hash):
+        if (
+            self.payable.payment_payer.pk
+            != PaymentUser.objects.get(pk=self.request.member.pk).pk
+        ):
+            return _("You are not allowed to process this payment.")
+
+        if self.payable.payment_amount == 0:
+            return _("No payment required for amount of €0.00")
+
+        if self.payable.payment:
+            return _("This object has already been paid for.")
+
+        if not self.payable.tpay_allowed:
+            return _("You are not allowed to use Thalia Pay for this payment.")
+
+        if str(hash(self.payable)) != str(payable_hash):
+            return _(
+                "This object has been changed in the mean time. You have not paid."
+            )
+
+        return None
+
     def post(self, request, *args, **kwargs):
-        if not (request.POST.keys() >= {"app_label", "model_name", "payable", "next"}):
+        if not (
+            request.POST.keys()
+            >= {"app_label", "model_name", "payable", "payable_hash", "next"}
+        ):
             raise SuspiciousOperation("Missing POST parameters")
 
         if not url_has_allowed_host_and_scheme(
@@ -208,32 +237,23 @@ class PaymentProcessView(SuccessMessageMixin, FormView):
         app_label = request.POST["app_label"]
         model_name = request.POST["model_name"]
         payable_pk = request.POST["payable"]
+        payable_hash = request.POST["payable_hash"]
 
-        payable_model = apps.get_model(app_label=app_label, model_name=model_name)
-        self.payable = payables.get_payable(payable_model.objects.get(pk=payable_pk))
+        try:
+            payable_model = apps.get_model(app_label=app_label, model_name=model_name)
+        except LookupError as error:
+            raise Http404("This app model does not exist.") from error
 
-        if (
-            self.payable.payment_payer.pk
-            != PaymentUser.objects.get(pk=self.request.member.pk).pk
-        ):
-            messages.error(
-                self.request, _("You are not allowed to process this payment.")
-            )
-            return redirect(request.POST["next"])
+        try:
+            payable_obj = payable_model.objects.get(pk=payable_pk)
+        except payable_model.DoesNotExist as error:
+            raise Http404("This payable does not exist.") from error
 
-        if self.payable.payment_amount == 0:
-            messages.error(self.request, _("No payment required for amount of €0.00"))
-            return redirect(request.POST["next"])
+        self.payable = payables.get_payable(payable_obj)
 
-        if self.payable.payment:
-            messages.error(self.request, _("This object has already been paid for."))
-            return redirect(request.POST["next"])
-
-        if not self.payable.tpay_allowed:
-            messages.error(
-                self.request,
-                _("You are not allowed to use Thalia Pay for this payment."),
-            )
+        error = self._check_payment_allowed(request, payable_hash)
+        if error:
+            messages.error(self.request, error)
             return redirect(request.POST["next"])
 
         if "_save" not in request.POST:

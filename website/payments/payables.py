@@ -64,6 +64,9 @@ class Payable:
     def immutable_model_fields_after_payment(self):
         return []
 
+    def __hash__(self):
+        return hash((self.payment_amount, self.payment_topic, self.payment_notes))
+
 
 class Payables:
     _registry = {}
