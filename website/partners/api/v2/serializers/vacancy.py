@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from partners.models import Vacancy
+from .vacancy_category import VacancyCategorySerializer
 
 
 class VacancySerializer(serializers.ModelSerializer):
@@ -20,4 +21,7 @@ class VacancySerializer(serializers.ModelSerializer):
             "partner",
             "company_name",
             "company_logo",
+            "categories",
         )
+
+    categories = VacancyCategorySerializer(many=True)
