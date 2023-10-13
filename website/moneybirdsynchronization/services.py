@@ -59,6 +59,81 @@ def delete_contact(member):
     moneybird_contact.delete()
 
 
+def create_or_update_contribution_invoice(obj):
+    """Create an invoice on Moneybird for a payable object."""
+    if not settings.MONEYBIRD_SYNC_ENABLED:
+        return None
+
+    invoice = MoneybirdExternalInvoice.get_for_object(obj)
+    if invoice is None:
+        invoice = MoneybirdExternalInvoice.create_for_object(obj)
+
+    moneybird = get_moneybird_api_service()
+
+    if invoice.moneybird_invoice_id:
+        moneybird.update_sales_invoice(
+            invoice.moneybird_invoice_id, invoice.to_moneybird()
+        )
+    else:
+        response = moneybird.create_sales_invoice(invoice.to_moneybird())
+        invoice.moneybird_invoice_id = response["id"]
+        invoice.moneybird_details_attribute_id = response["details"][0]["id"]
+        invoice.save()
+
+    send_contribution_invoice(invoice)
+
+    if invoice.payable.payment is not None:
+        # Mark the invoice as paid if the payable is paid as well
+        try:
+            moneybird_payment = MoneybirdPayment.objects.get(
+                payment=invoice.payable.payment
+            )
+        except MoneybirdPayment.DoesNotExist:
+            moneybird_payment = None
+
+        if (
+            moneybird_payment is not None
+            and moneybird_payment.moneybird_financial_mutation_id is not None
+        ):
+            mutation_info = moneybird.get_financial_mutation_info(
+                invoice.payable.payment.moneybird_payment.moneybird_financial_mutation_id
+            )
+            if not any(
+                x["invoice_type"] == "SalesInvoice"
+                and x["invoice_id"] == invoice.moneybird_invoice_id
+                for x in mutation_info["payments"]
+            ):
+                # If the payment itself also already exists in a financial mutation
+                # and is not yet linked to the booking, link it
+                moneybird.link_mutation_to_booking(
+                    mutation_id=int(
+                        invoice.payable.payment.moneybird_payment.moneybird_financial_mutation_id
+                    ),
+                    booking_id=int(invoice.moneybird_invoice_id),
+                    price_base=str(invoice.payable.payment_amount),
+                    booking_type="SalesInvoice",
+                )
+        else:
+            # Otherwise, mark it as paid without linking to an actual payment
+            # (announcing that in the future, a mutation should become available)
+            moneybird.register_invoice_payment(
+                invoice.moneybird_invoice_id,
+                {
+                    "payment": {
+                        "payment_date": invoice.payable.payment.created_at.strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "price": str(invoice.payable.payment_amount),
+                        "financial_account_id": financial_account_id_for_payment_type(
+                            invoice.payable.payment.type
+                        ),
+                    }
+                },
+            )
+
+    return invoice
+
+
 def create_or_update_external_invoice(obj):
     """Create an external sales invoice on Moneybird for a payable object."""
     if not settings.MONEYBIRD_SYNC_ENABLED:
@@ -304,3 +379,14 @@ def process_thalia_pay_batch(batch):
             }
         }
     )
+
+
+def send_contribution_invoice(instance):
+    """Send an invoice to the member."""
+    if not settings.MONEYBIRD_SYNC_ENABLED:
+        return
+
+    moneybird = get_moneybird_api_service()
+    response = moneybird.get_invoice_info(instance.moneybird_invoice_id)
+    if response["state"] == "draft":
+        moneybird.send_invoice(instance.moneybird_invoice_id)

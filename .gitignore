@@ -13,6 +13,7 @@ celerybeat-schedule.*
 db.sqlite3
 *.egg-info
 .ruff_cache/
+.env
 
 website/media/
 website/filepond-temp-uploads/

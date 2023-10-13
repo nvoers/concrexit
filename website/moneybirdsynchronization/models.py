@@ -18,6 +18,17 @@ from sales.models.order import Order
 from thaliawebsite import settings
 
 
+def datetime_to_membership_period(date):
+    """Convert a :class:`~datetime.date` to a period that corresponds with the current membership period."""
+    start_date = date
+    if start_date.month == 8:
+        start_date = start_date.replace(month=9, day=1)
+    end_date = start_date.replace(month=8, day=31)
+    if start_date.month > 8:
+        end_date = end_date.replace(year=start_date.year + 1)
+    return f"{start_date.strftime('%Y%m%d')}..{end_date.strftime('%Y%m%d')}"
+
+
 def financial_account_id_for_payment_type(payment_type) -> Optional[int]:
     if payment_type == Payment.CARD:
         return settings.MONEYBIRD_CARD_FINANCIAL_ACCOUNT_ID
@@ -219,6 +230,88 @@ class MoneybirdExternalInvoice(models.Model):
             return None
 
     def to_moneybird(self):
+        if isinstance(self.payable_object, (Registration, Renewal)):
+            return self.to_moneybird_invoice()
+        else:
+            moneybird = get_moneybird_api_service()
+
+            if self.payable.payment_payer is None:
+                contact_id = settings.MONEYBIRD_UNKNOWN_PAYER_CONTACT_ID
+            else:
+                moneybird_contact, __ = MoneybirdContact.objects.get_or_create(
+                    member=self.payable.payment_payer
+                )
+                if moneybird_contact.moneybird_id is None:
+                    # I know this is ugly, but I don't want to totally refactor the app.
+                    from moneybirdsynchronization.services import (
+                        create_or_update_contact,
+                    )
+
+                    moneybird_contact = create_or_update_contact(
+                        moneybird_contact.member
+                    )
+
+                contact_id = moneybird_contact.moneybird_id
+
+            invoice_date = date_for_payable_model(self.payable_object).strftime(
+                "%Y-%m-%d"
+            )
+
+            project_name = project_name_for_payable_model(self.payable_object)
+
+            project_id = None
+            if project_name is not None:
+                project, __ = MoneybirdProject.objects.get_or_create(name=project_name)
+                if project.moneybird_id is None:
+                    response = moneybird.create_project(project.to_moneybird())
+                    project.moneybird_id = response["id"]
+                    project.save()
+
+                project_id = project.moneybird_id
+
+            ledger_id = ledger_id_for_payable_model(self.payable_object)
+
+            source_url = settings.BASE_URL + reverse(
+                f"admin:{self.payable_object._meta.app_label}_{self.payable_object._meta.model_name}_change",
+                args=(self.object_id,),
+            )
+
+            data = {
+                "external_sales_invoice": {
+                    "contact_id": int(contact_id),
+                    "reference": f"{self.payable.payment_topic} [{self.payable.model.pk}]",
+                    "source": f"Concrexit ({settings.SITE_DOMAIN})",
+                    "date": invoice_date,
+                    "currency": "EUR",
+                    "prices_are_incl_tax": True,
+                    "details_attributes": [
+                        {
+                            "description": self.payable.payment_notes,
+                            "price": str(self.payable.payment_amount),
+                        },
+                    ],
+                }
+            }
+
+            if source_url is not None:
+                data["external_sales_invoice"]["source_url"] = source_url
+            if project_id is not None:
+                data["external_sales_invoice"]["details_attributes"][0][
+                    "project_id"
+                ] = int(project_id)
+            if ledger_id is not None:
+                data["external_sales_invoice"]["details_attributes"][0][
+                    "ledger_id"
+                ] = int(ledger_id)
+
+            if self.moneybird_details_attribute_id is not None:
+                data["external_sales_invoice"]["details_attributes"][0]["id"] = int(
+                    self.moneybird_details_attribute_id
+                )
+
+            return data
+
+    def to_moneybird_invoice(self):
         moneybird = get_moneybird_api_service()
 
         if self.payable.payment_payer is None:
@@ -251,43 +344,42 @@ class MoneybirdExternalInvoice(models.Model):
 
         ledger_id = ledger_id_for_payable_model(self.payable_object)
 
-        source_url = settings.BASE_URL + reverse(
-            f"admin:{self.payable_object._meta.app_label}_{self.payable_object._meta.model_name}_change",
-            args=(self.object_id,),
-        )
+        period = None
+        if isinstance(self.payable_object, (Registration, Renewal)):
+            period = datetime_to_membership_period(
+                self.payable_object.created_at.date()
+            )
 
         data = {
-            "external_sales_invoice": {
+            "sales_invoice": {
                 "contact_id": int(contact_id),
                 "reference": f"{self.payable.payment_topic} [{self.payable.model.pk}]",
-                "source": f"Concrexit ({settings.SITE_DOMAIN})",
-                "date": invoice_date,
+                "invoice_date": invoice_date,
                 "currency": "EUR",
                 "prices_are_incl_tax": True,
                 "details_attributes": [
                     {
                         "description": self.payable.payment_notes,
                         "price": str(self.payable.payment_amount),
+                        "tax_rate_id": settings.MONEYBIRD_CONTRIBUTION_TAX_RATE_ID,
                     },
                 ],
             }
         }
 
-        if source_url is not None:
-            data["external_sales_invoice"]["source_url"] = source_url
         if project_id is not None:
-            data["external_sales_invoice"]["details_attributes"][0]["project_id"] = int(
+            data["sales_invoice"]["details_attributes"][0]["project_id"] = int(
                 project_id
             )
         if ledger_id is not None:
-            data["external_sales_invoice"]["details_attributes"][0]["ledger_id"] = int(
-                ledger_id
-            )
+            data["sales_invoice"]["details_attributes"][0]["ledger_id"] = int(ledger_id)
 
         if self.moneybird_details_attribute_id is not None:
-            data["external_sales_invoice"]["details_attributes"][0]["id"] = int(
+            data["sales_invoice"]["details_attributes"][0]["id"] = int(
                 self.moneybird_details_attribute_id
             )
+        if period is not None:
+            data["sales_invoice"]["details_attributes"][0]["period"] = period
 
         return data
 
