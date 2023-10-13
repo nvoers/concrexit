@@ -103,7 +103,7 @@ class MoneybirdAPIService:
     def send_invoice(self, invoice_id):
         return self._administration.patch(
             f"sales_invoices/{invoice_id}/send_invoice",
-            {},
+            {"sales_invoice_sending": {"delivery_method": "Manual"}},
         )
 
     def get_invoice_info(self, invoice_id):
